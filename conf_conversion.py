@@ -12,7 +12,6 @@ import os
 import sys
 from logging import handlers
 from logging.handlers import RotatingFileHandler
-from subprocess import check_output
 
 urllib3.disable_warnings()
 
@@ -27,6 +26,8 @@ class SoapTransformation(object):
         self.finnal_dict = {}
         self.datetime_now = ''
         self.pool_name_list = []
+        self.pool_name_intercept = {}
+        self.funclist = []
     # user = bigsuds.BIGIP(hostname="58.246.94.106", username="admin", password="admin", port="442")
 
     def write_log(self, content):
@@ -49,12 +50,12 @@ class SoapTransformation(object):
             os._exit(0)
 
     def get_datacenter(self):
-        datacenterlist = self.con.GlobalLB.DataCenter.get_list()
-        server_list = self.con.GlobalLB.DataCenter.get_server([datacenterlist])
+        datacenterlist = self.interTry(self.con.GlobalLB.DataCenter.get_list)
+        server_list = self.interTry(self.con.GlobalLB.DataCenter.get_server, [datacenterlist])
         return server_list
 
     def get_server(self, vserver_name):
-        vsaddress = self.con.GlobalLB.VirtualServerV2.get_address([vserver_name])
+        vsaddress = self.interTry(self.con.GlobalLB.VirtualServerV2.get_address, [vserver_name])
         return vsaddress
 
     def get_pool(self):
@@ -62,37 +63,63 @@ class SoapTransformation(object):
         pool_dict = {}
         pool_list = []
         tmp_list = []
-        pool_list = self.con.GlobalLB.PoolV2.get_list_by_type(["GTM_QUERY_TYPE_A"])[0] + self.con.GlobalLB.PoolV2.get_list_by_type(["GTM_QUERY_TYPE_AAAA"])[0] + self.con.GlobalLB.PoolV2.get_list_by_type(["GTM_QUERY_TYPE_CNAME"])[0]
+        pool_list = self.interTry(self.con.GlobalLB.PoolV2.get_list_by_type,["GTM_QUERY_TYPE_A"])[0] + self.interTry(self.con.GlobalLB.PoolV2.get_list_by_type, ["GTM_QUERY_TYPE_AAAA"])[0] + self.interTry(self.con.GlobalLB.PoolV2.get_list_by_type, ["GTM_QUERY_TYPE_CNAME"])[0]
         for item in pool_list:
             tmp = {}
             member_list = []
             pool_name = item["pool_name"]
-            temp = self.con.GlobalLB.PoolV2.get_member([item])
-            if item["pool_type"] == "GTM_QUERY_TYPE_AAAA" or item["pool_type"] == "GTM_QUERY_TYPE_A":
+            temp = self.interTry(self.con.GlobalLB.PoolV2.get_member, [item])
+            if item["pool_type"] == ("GTM_QUERY_TYPE_AAAA" and temp != [[]]) or (item["pool_type"] == "GTM_QUERY_TYPE_A" and temp != [[]]):
                 for sub_item in temp[0]:
                     member_list += self.get_server(sub_item)
-                tmp["lb_method"] = self.con.GlobalLB.Pool.get_alternate_lb_method([pool_name])[0]
-                tmp["preferred_method"] = self.con.GlobalLB.Pool.get_preferred_lb_method([pool_name])[0]
+                tmp["lb_method"] = self.interTry(self.con.GlobalLB.Pool.get_alternate_lb_method, [pool_name])[0]
+                tmp["preferred_method"] = self.interTry(self.con.GlobalLB.Pool.get_preferred_lb_method, [pool_name])[0]
 #                tmp["fall_back_ip"] = self.con.GlobalLB.Pool.get_fallback_ip([pool_name])[0]
-                tmp["ttl"] = self.con.GlobalLB.Pool.get_ttl([pool_name])[0]
-                tmp["max_back_num"] = self.con.GlobalLB.Pool.get_answers_to_return([pool_name])[0]
+                tmp["ttl"] = self.interTry(self.con.GlobalLB.Pool.get_ttl, [pool_name])[0]
+                tmp["max_back_num"] = self.interTry(self.con.GlobalLB.Pool.get_answers_to_return, [pool_name])[0]
                 tmp["pool_type"] = item["pool_type"]
-                member_info = self.con.GlobalLB.PoolMember.get_ratio([pool_name],[member_list])[0]
+                member_info = self.interTry(self.con.GlobalLB.PoolMember.get_ratio ,[pool_name],[member_list])[0]
                 for mem in range(len(member_info)):
-                    member_info[mem]["member"] = {temp[0][mem]["server"]:member_list[mem]}
-                    member_info[mem]["member"]["status"] = self.con.GlobalLB.Server.get_object_status([temp[0][mem]["server"]])[0]["availability_status"]
+                    server_tmp = temp[0][mem]["server"]
+                    if len(server_tmp) > 32:
+                        server_tmp = server_tmp[-32:]
+                    member_info[mem]["member"] = {server_tmp:member_list[mem]}
+                    member_info[mem]["member"]["status"] = self.interTry(self.con.GlobalLB.Server.get_object_status, [temp[0][mem]["server"]])[0]["availability_status"]
                 tmp["pool_member"] = member_info
             elif item["pool_type"] == "GTM_QUERY_TYPE_CNAME":
                 for index in temp[0]:
                     tmp["pool_member"] = index["server"]
-                    tmp["ttl"] = self.con.GlobalLB.Pool.get_ttl([pool_name])[0]
-            pool_dict[item["pool_name"] + "_" + item["pool_type"].split("_")[-1]] = tmp
+                    tmp["ttl"] = self.interTry(self.con.GlobalLB.Pool.get_ttl, [pool_name])[0]
+            if item["pool_type"].split("_")[-1] == "A":
+                if len(item["pool_name"].split("/")[-1]) > 30:
+#                    self.pool_name_intercept[item["pool_name"] + "_" + item["pool_type"].split("_")[-1]] = item["pool_name"][:38] + "_" + item["pool_type"].split("_")[-1]
+                    self.pool_name_intercept[item["pool_name"]] = item["pool_name"][:38]
+                    pool_dict[item["pool_name"][:38] + "_" + item["pool_type"].split("_")[-1]] = tmp
+                else:
+                    pool_dict[item["pool_name"] + "_" + item["pool_type"].split("_")[-1]] = tmp
+                    self.pool_name_intercept[item["pool_name"]] = item["pool_name"]
+            elif item["pool_type"].split("_")[-1] == "AAAA":
+                if len(item["pool_name"].split("/")[-1]) > 27:
+#                    self.pool_name_intercept[item["pool_name"] + "_" + item["pool_type"].split("_")[-1]] = item["pool_name"][:35] + "_" + item["pool_type"].split("_")[-1]
+                    self.pool_name_intercept[item["pool_name"]] = item["pool_name"][:35]
+                    pool_dict[item["pool_name"][:35] + "_" + item["pool_type"].split("_")[-1]] = tmp
+                else:
+                    pool_dict[item["pool_name"] + "_" + item["pool_type"].split("_")[-1]] = tmp
+                    self.pool_name_intercept[item["pool_name"]] = item["pool_name"]
+            else:
+                if len(item["pool_name"].split("/")[-1]) > 26:
+#                    self.pool_name_intercept[item["pool_name"] + "_" + item["pool_type"].split("_")[-1]] = item["pool_name"][:34] + "_" + item["pool_type"].split("_")[-1]
+                    self.pool_name_intercept[item["pool_name"]] = item["pool_name"][:34]
+                    pool_dict[item["pool_name"][:34] + "_" + item["pool_type"].split("_")[-1]] = tmp
+                else:
+                    pool_dict[item["pool_name"] + "_" + item["pool_type"].split("_")[-1]] = tmp
+                    self.pool_name_intercept[item["pool_name"]] = item["pool_name"]
         return pool_dict
 
     def get_static(self):
         self.write_log("Start reading the configuration of the topology...")
-        static_list = self.con.GlobalLB.Topology.get_list()
-        order_list = self.con.GlobalLB.Topology.get_order(static_list)
+        static_list = self.interTry(self.con.GlobalLB.Topology.get_list)
+        order_list = self.interTry(self.con.GlobalLB.Topology.get_order, static_list)
         for item in range(len(static_list)):
             static_list[item]["order"] = order_list[item]
         return static_list
@@ -100,20 +127,22 @@ class SoapTransformation(object):
     def get_userZone(self):
         self.write_log("Start reading the configuration of the region...")
         zone_dict = {}
-        userzonelist = self.con.GlobalLB.Region.get_list()
+        userzonelist = self.interTry(self.con.GlobalLB.Region.get_list)
         for item in userzonelist:
-            zone_dict[item["name"]] = self.con.GlobalLB.Region.get_region_item([item])[0]
+            zone_dict[item["name"]] = self.interTry(self.con.GlobalLB.Region.get_region_item, [item])[0]
         return zone_dict
 
     def get_rrs(self):
         self.write_log("Start reading the configuration of the wideip...")
         rrs_dict = {}
-        for item in  self.con.GlobalLB.WideIP.get_list():
+        for item in self.interTry(self.con.GlobalLB.WideIP.get_list):
             tmp = {}
-            wideippool_list = self.con.GlobalLB.WideIP.get_wideip_pool([item])
+            wideippool_list = self.interTry(self.con.GlobalLB.WideIP.get_wideip_pool, [item])
 #            rrs_dict[item.split("/")[2]] = wideippool_list[0]
             tmp["pool"] = wideippool_list[0]
-            tmp["lb_method"] = self.con.GlobalLB.WideIP.get_lb_method([item])
+            for index in range(len(tmp["pool"])):
+                tmp["pool"][index]["pool_name"] = self.pool_name_intercept[tmp["pool"][index]["pool_name"]]
+            tmp["lb_method"] = self.interTry(self.con.GlobalLB.WideIP.get_lb_method, [item])
             rrs_dict[item.split("/")[2]] = tmp
         return rrs_dict
 
@@ -121,32 +150,57 @@ class SoapTransformation(object):
         self.write_log("Start reading the configuration of the zonerunner...")
         zone_rrs_dict = {}
         view_dict = {}
-        for views in self.con.Management.View.get_list():
+        for views in self.interTry(self.con.Management.View.get_list):
             zone_dict = {}
-            for zones in self.con.Management.Zone.get_zone_name([views["view_name"]]):
-                zone_dict[zones["zone_name"]] = self.con.Management.ResourceRecord.get_rrs([zones])[0]
+            for zones in self.interTry(self.con.Management.Zone.get_zone_name, [views["view_name"]]):
+                zone_dict[zones["zone_name"]] = self.interTry(self.con.Management.ResourceRecord.get_rrs, [zones])[0]
             view_dict[views["view_name"]] = zone_dict
         return view_dict
 
-    def write_file(self):
-        self.write_log("start reading F5's config...")
+    def interTry(self, func, *args):
+        stats = False
+        for _ in range(3):
+            try:
+                result = func(*args)
+                if stats:
+                    self.write_log("Try succeed")
+                return result
+            except Exception as e:
+                if "Operation timed out" in str(e):
+                    self.write_log(e)
+                    self.write_log("Try again...")
+                    stats = True
+                    continue
+                else:
+                    self.write_log(e)
+                    time.sleep(5)
+                    os._exit(0)
+        self.write_log("The number of timeouts has reached 3\n")
+        os._exit(0)
+
+    def funcTry(self, func):
         try:
-            pool_msg = self.get_pool()
-            static_msg = self.get_static()
-            userzone_msg = self.get_userZone()
-            wideip_msg = self.get_rrs()
-            rrs_msg = self.get_zone_content()
+            result = func()
+            return result
         except Exception as e:
             self.write_log(e)
             os._exit(0)
+
+    def write_file(self):
+        result_list = []
+        self.write_log("start reading F5's config...")
+        self.funclist.extend([self.get_pool, self.get_static, self.get_userZone, self.get_rrs, self.get_zone_content])
+        for item in self.funclist:
+            result_list.append(self.funcTry(item))
         file_dict = {}
         file_path = 'backup_data/'
-        file_dict["pool"] = pool_msg
-        file_dict["static"] = static_msg
-        file_dict["region"] = userzone_msg
-        file_dict["wideip"] = wideip_msg
-        file_dict["rrs"] = rrs_msg
+        file_dict["pool"] = result_list[0]
+        file_dict["static"] = result_list[1]
+        file_dict["region"] = result_list[2]
+        file_dict["wideip"] = result_list[3]
+        file_dict["rrs"] = result_list[4]
         self.datetime_now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        file_dict = json.dumps(file_dict, indent=4)
         with open(file_path + '%s' % self.datetime_now, 'w') as f:
             f.write(str(file_dict))
 
@@ -167,14 +221,31 @@ class ConfigManage(SoapTransformation):
             files = "backup_data/" + self.datetime_now
         try:
             with open('%s' % files, 'r') as f:
-                self.data = eval(f.read())
+                self.data = json.loads(f.read())
         except Exception as e:
             self.write_log(e)
             os._exit(0)
 
     def name_replace(self, name):
-        name = name.replace("-", "_")
-        name = name.replace(".", "_")
+        if name.count("-") != 0:
+#            name = name[:-name.count("-")]
+            name = name.replace("-", "__")
+        if name.count(".") != 0:
+#            name = name[:-name.count(".")*2]
+            name = name.replace(".", "___")
+        if len(name) > 32:
+            length = len(name)
+            if "_CNAME" in name:
+                name = name[:-6][:-(length - 32)] + "_CNAME"
+            elif "_AAAA" in name:
+                name = name[:-5][:-(length - 32)] + "_AAAA"
+            elif "_A" in name:
+                name = name[:-2][:-(length - 32)] + "_A"
+            else:
+                if "/Common/" in name:
+                    name = name[:40]
+                else:
+                    name = name[:32]
         return name
 
     def inte_post_requests(self, url, data):
@@ -210,6 +281,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_datacenter:" + str(response))
+            os._exit(0)
 
     def inte_member(self, resource_content):
         url = 'https://%s:20120/dc/DC1/gmember' % self.server_ip
@@ -221,6 +293,7 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_member:" + str(response))
+            os._exit(0)
 
     def inte_syncgroup(self, dc_name):
         url = 'https://%s:20120/syngroup' % self.server_ip
@@ -235,6 +308,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_syncgroup:" + str(response))
+            os._exit(0)
 
     def inte_region(self, region_name):
         url = 'https://%s:20120/region' % self.server_ip
@@ -247,6 +321,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_region:" + str(response))
+            os._exit(0)
 
     def inte_region_member(self, region_name, member_type, region_name_bak=None, ips=None, sip=None, eip=None):
         url = 'https://%s:20120/region/%s/member' % (self.server_ip, region_name)
@@ -263,8 +338,9 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_region_member:" + str(response))
+            os._exit(0)
 
-    def inte_sp_policy(self, stype, dtype, sdata, ddata, slogic="0", dlogic="0", priority=''):
+    def inte_sp_policy(self, stype, dtype, sdata, ddata, slogic=1, dlogic=1, priority=''):
         url = 'https://%s:20120/sp_policy' % self.server_ip
         data = {"src_type": stype, "dst_type": dtype, "src_logic": slogic, "dst_logic":dlogic, "priority": priority}
         if stype == "ip_subnet" or stype == "region":
@@ -276,6 +352,7 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_sp_policy:" + str(response))
+            os._exit(0)
 
     def inte_pool(self, content):
         url = 'https://%s:20120/gpool' % self.server_ip
@@ -287,6 +364,7 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_pool:" + str(response))
+            os._exit(0)
 
     def inte_zone_add(self, zone_name):
         url = 'https://%s:20120/views/ADD/dzone' % self.server_ip
@@ -300,11 +378,12 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_zone_add:" + str(response))
+            os._exit(0)
 
-    def inte_zonerrs(self, zones, algorithm, gpool_list, last_resort_pool=""):
+    def inte_zonerrs(self, zones, algorithm, gpool_list, last_resort_pool="", domain=''):
         url = 'https://%s:20120/views/ADD/dzone/%s/gmap' % (self.server_ip, zones)
         data = {
-            "name": '',
+            "name": domain,
             "algorithm": algorithm,
             "last_resort_pool": last_resort_pool,
             "persist_enable": "no",
@@ -317,6 +396,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_zonerrs:" + str(response))
+            os._exit(0)
 
     def inte_zone_default(self, views, zone_name, zone_content):
         url = "https://%s:20120/views/%s/zones" % (self.server_ip, views)
@@ -333,6 +413,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_zone_default_rrs:" + str(response))
+            os._exit(0)
 
     def edit_server(self, status, ids):
         url = "https://%s:20120/dc/DC1/gmember" % self.server_ip
@@ -346,6 +427,7 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_edit_server:" + str(response))
+            os._exit(0)
 
     def inte_get_addzones(self):
         url = "https://%s:20120/views/ADD/dzone" % self.server_ip
@@ -355,6 +437,7 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_get_addzones:" + str(response))
+            os._exit(0)
         return response
 
     def inte_delete_addzones(self, ids):
@@ -369,6 +452,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_delete_addzones:" + str(response))
+            os._exit(0)
 
     def inte_get_zones(self):
         url = "https://%s:20120/views/default/zones" % self.server_ip
@@ -378,6 +462,7 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_get_zones:" + str(response))
+            os._exit(0)
         return response
 
     def inte_delete_zones(self, ids):
@@ -392,6 +477,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_delete_zones:" + str(response))
+            os._exit(0)
 
     def inte_get_sp_policy(self):
         url = "https://%s:20120/sp_policy" % self.server_ip
@@ -401,6 +487,7 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_get_sp_policy:" + str(response))
+            os._exit(0)
         return response
 
     def inte_delete_sp_policy(self, ids):
@@ -415,6 +502,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_delete_sp_policy:" + str(response))
+            os._exit(0)
 
     def inte_get_userzone(self):
         url = "https://%s:20120/region" % self.server_ip
@@ -424,6 +512,7 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_get_userzone:" + str(response))
+            os._exit(0)
         return response
 
     def inte_delete_userzone(self, ids):
@@ -438,6 +527,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_delete_userzone:" + str(response))
+            os._exit(0)
 
     def inte_get_syncgroup(self):
         url = "https://%s:20120/syngroup" % self.server_ip
@@ -447,6 +537,7 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_get_syncgroup:" + str(response))
+            os._exit(0)
         return response
 
     def inte_delete_syncgroup(self, ids):
@@ -461,6 +552,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_delete_syncgroup:" + str(response))
+            os._exit(0)
 
     def inte_get_gpool(self):
         url = "https://%s:20120/gpool" % self.server_ip
@@ -470,6 +562,7 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_get_gpool:" + str(response))
+            os._exit(0)
         return response
 
     def inte_delete_gpool(self, ids):
@@ -484,6 +577,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_delete_gpool:" + str(response))
+            os._exit(0)
 
     def inte_get_datacenter(self):
         url = "https://%s:20120/dc" % self.server_ip
@@ -493,6 +587,7 @@ class ConfigManage(SoapTransformation):
             pass
         else:
             self.write_log("inte_get_datacenter:" + str(response))
+            os._exit(0)
         return response
 
     def inte_delete_datacenter(self, ids):
@@ -507,6 +602,7 @@ class ConfigManage(SoapTransformation):
                 pass
         else:
             self.write_log("inte_delete_datacenter:" + str(response))
+            os._exit(0)
 
     def add_datacenter(self):
         self.write_log("Start distributing configuration of the datacenter...")
@@ -519,25 +615,33 @@ class ConfigManage(SoapTransformation):
         server_dict = {}
         content = []
         status = ''
+        port = 0
+        name = ''
         for index in self.data["pool"]:
-            for sub_index in self.data["pool"][index]["pool_member"]:
-                if "member" in sub_index:
-                    server_name = [item for item in sub_index["member"].keys()][0]
-                    server_name_act = server_name
-                    server_name_act = self.name_replace(server_name_act)
-                    if server_name_act not in server_dict:
-                        self.server_names.append(server_name)
-                        if sub_index["member"]["status"] == "AVAILABILITY_STATUS_RED":
-                            status = "no"
-                        else:
-                            status = "yes"
-                        content.append({"gmember_name":server_name_act.split("/")[2], "ip": sub_index["member"][server_name]["address"],
-                                        "port": sub_index["member"][server_name]["port"],"linkid":"","enable":status})
-                        server_dict[server_name_act] = {"address":sub_index["member"][server_name]["address"],"port":sub_index["member"][server_name]["port"]}
-                    if len(content) == 200:
-                        self.inte_member(content)
-                        content = []
-        self.inte_member(content)
+            if "pool_member" in self.data["pool"][index]:
+                for sub_index in self.data["pool"][index]["pool_member"]:
+                    if "member" in sub_index:
+                        server_name = [item for item in sub_index["member"].keys()][0]
+                        server_name_act = server_name
+                        server_name_act = self.name_replace(server_name_act)
+                        if server_name_act not in server_dict:
+                            self.server_names.append(server_name)
+                            if sub_index["member"]["status"] == "AVAILABILITY_STATUS_RED":
+                                status = "no"
+                            else:
+                                status = "yes"
+                            if sub_index["member"][server_name]["port"] == 0:
+                                port = 80
+                            else:
+                                port = sub_index["member"][server_name]["port"]
+                            name = server_name_act.split("/")[-1]
+                            content.append({"gmember_name":name, "ip": sub_index["member"][server_name]["address"], "port": port,"linkid":"","enable":status})
+                            server_dict[server_name_act] = {"address":sub_index["member"][server_name]["address"],"port":sub_index["member"][server_name]["port"]}
+                        if len(content) == 200:
+                            self.inte_member(content)
+                            content = []
+        if len(content) != 0:
+            self.inte_member(content)
 
     def add_syncgroup(self):
         self.write_log("Start distributing configuration of the syncgroup...")
@@ -574,21 +678,26 @@ class ConfigManage(SoapTransformation):
         lb_topplogy = ""
         content = []
         for item in self.data["pool"]:
-            self.pool_name_list.append(item)
             gmember_list = []
-            for sub_index in self.data["pool"][item]["pool_member"]:
-                gpool = ''
-                if "member" in sub_index:
-                    servers = [i for i in sub_index["member"].keys()][0]
-                    servers = self.name_replace(servers)
-                    gmember_list.append({"dc_name": "DC1", "gmember_name": servers.split("/")[-1], "ratio": sub_index["ratio"]})
-                else:
-                    cnames = self.data["pool"][item]["pool_member"]
-                gpool = item.split("/")[-1]
-                gpool = self.name_replace(gpool)
+            if "pool_member" in self.data["pool"][item]:
+                self.pool_name_list.append(item)
+                for sub_index in self.data["pool"][item]["pool_member"]:
+                    gpool = ''
+                    if "member" in sub_index:
+                        servers = [i for i in sub_index["member"].keys()][0]
+                        servers = self.name_replace(servers)
+                        temp = {"dc_name": "DC1", "gmember_name": servers.split("/")[-1], "ratio": sub_index["ratio"]}
+                        if temp not in gmember_list:
+                            gmember_list.append(temp)
+                    else:
+                        cnames = self.data["pool"][item]["pool_member"]
+                    gpool = item.split("/")[-1]
+                    gpool = self.name_replace(gpool)
+            else:
+                continue
             if "_CNAME" in item:
                 content.append({"name":gpool, "ttl": self.data["pool"][item]["ttl"], "type":"CNAME", "cname": self.data["pool"][item]["pool_member"], "warning":"yes", "enable":"yes"})
-            else:
+            elif "_A" or "_AAAA" in item:
                 if self.data["pool"][item]["preferred_method"] == "LB_METHOD_ROUND_ROBIN":
                     pr_topplogy = "rr"
                     lb_topplogy = "none"
@@ -610,7 +719,8 @@ class ConfigManage(SoapTransformation):
             if len(content) == 200:
                 self.inte_pool(content)
                 content = []
-        self.inte_pool(content)
+        if len(content) != 0:
+            self.inte_pool(content)
 
     def add_sp_policy(self):
         self.write_log("Start distributing configuration of the static proximity...")
@@ -629,10 +739,21 @@ class ConfigManage(SoapTransformation):
                     dcontent = item["server"]["content"]
                     content_tmp = dcontent
                     dcontent = self.name_replace(dcontent)
-                    if content_tmp + "_A" in self.pool_name_list:
-                        self.inte_sp_policy("ip_subnet", "gpool", item["ldns"]["content"], dcontent.split("/")[-1] + "_A", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
-                    elif content_tmp + "_CNAME" in self.pool_name_list:
-                        self.inte_sp_policy("ip_subnet", "gpool", item["ldns"]["content"], dcontent.split("/")[-1] + "_CNAME", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                    if (len(content_tmp) > 38 and content_tmp[:38] + "_A" in self.pool_name_list) or (content_tmp + "_A" in self.pool_name_list):
+                        if len(content_tmp) > 38:
+                            self.inte_sp_policy("ip_subnet", "gpool", item["ldns"]["content"], dcontent.split("/")[-1][:30] + "_A", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                        else:
+                            self.inte_sp_policy("ip_subnet", "gpool", item["ldns"]["content"], dcontent.split("/")[-1] + "_A", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                    elif (len(content_tmp) > 35 and content_tmp[:35] + "_AAAA" in self.pool_name_list) or (content_tmp + "_AAAA" in self.pool_name_list):
+                        if len(content_tmp) > 35:
+                            self.inte_sp_policy("ip_subnet", "gpool", item["ldns"]["content"], dcontent.split("/")[-1][:27] + "_AAAA", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                        else:
+                            self.inte_sp_policy("ip_subnet", "gpool", item["ldns"]["content"], dcontent.split("/")[-1] + "_AAAA", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                    elif (len(content_tmp) > 34 and content_tmp[:34] + "_CNAME" in self.pool_name_list) or (content_tmp + "_CNAME" in self.pool_name_list):
+                        if len(content_tmp) > 34:
+                            self.inte_sp_policy("ip_subnet", "gpool", item["ldns"]["content"], dcontent.split("/")[-1][:26] + "_CNAME", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                        else:
+                            self.inte_sp_policy("ip_subnet", "gpool", item["ldns"]["content"], dcontent.split("/")[-1] + "_CNAME", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
             elif item["ldns"]["type"] == "REGION_TYPE_REGION":
                 scontent= item["ldns"]["content"]
                 scontent = self.name_replace(scontent)
@@ -646,18 +767,39 @@ class ConfigManage(SoapTransformation):
                     dcontent = item["server"]["content"]
                     content_tmp = dcontent
                     dcontent = self.name_replace(dcontent)
-                    if content_tmp + "_A" in self.pool_name_list:
-                        self.inte_sp_policy("region", "gpool", scontent.split("/")[-1], dcontent.split("/")[-1] + "_A", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
-                    elif content_tmp + "_AAAA" in self.pool_name_list:
-                        self.inte_sp_policy("region", "gpool", scontent.split("/")[-1], dcontent.split("/")[-1] + "_AAAA", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
-                    elif content_tmp + "_CNAME" in self.pool_name_list:
-                        self.inte_sp_policy("region", "gpool", scontent.split("/")[-1], dcontent.split("/")[-1] + "_CNAME", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                    if (len(content_tmp) > 38 and content_tmp[:38] + "_A" in self.pool_name_list) or (content_tmp + "_A" in self.pool_name_list):
+                        if len(content_tmp) > 38:
+                            self.inte_sp_policy("region", "gpool", scontent.split("/")[-1], dcontent.split("/")[-1][:30] + "_A", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                        else:
+                            self.inte_sp_policy("region", "gpool", scontent.split("/")[-1], dcontent.split("/")[-1] + "_A", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                    elif (len(content_tmp) > 35 and content_tmp[:35] + "_AAAA" in self.pool_name_list) or (content_tmp + "_AAAA" in self.pool_name_list):
+                        if len(content_tmp) > 35:
+                            self.inte_sp_policy("region", "gpool", scontent.split("/")[-1], dcontent.split("/")[-1][:27] + "_AAAA", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                        else:
+                            self.inte_sp_policy("region", "gpool", scontent.split("/")[-1], dcontent.split("/")[-1] + "_AAAA", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                    elif (len(content_tmp) > 34 and content_tmp[:34] + "_CNAME" in self.pool_name_list) or (content_tmp + "_CNAME" in self.pool_name_list):
+                        if len(content_tmp) > 34:
+                            self.inte_sp_policy("region", "gpool", scontent.split("/")[-1], dcontent.split("/")[-1][:26] + "_CNAME", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
+                        else:
+                            self.inte_sp_policy("region", "gpool", scontent.split("/")[-1], dcontent.split("/")[-1] + "_CNAME", item["ldns"]["negate"], item["server"]["negate"], str(item["order"]))
 
     def add_wideip(self):
         self.write_log("Start distributing configuration of the rrs(add)...")
         algorithm = ''
+        zone_list = []
         for item in self.data["wideip"]:
-            self.inte_zone_add(item)
+            if "*." in item:
+                if item.split("*.")[-1] not in zone_list:
+                    self.inte_zone_add(item.split("*.")[-1])
+                    zone_list.append(item.split("*.")[-1])
+                else:
+                    continue
+            else:
+                if item not in zone_list:
+                    self.inte_zone_add(item)
+                    zone_list.append(item)
+                else:
+                    continue
             gpool_list = []
             for sub_item in self.data["wideip"][item]["pool"]:
                 gpool_name = ""
@@ -675,17 +817,20 @@ class ConfigManage(SoapTransformation):
                     gpool_name = gpool_name.split("/")[-1]
                     gpool_name = self.name_replace(gpool_name)
                     gpool_list.append({"gpool_name": gpool_name,"ratio":sub_item["ratio"]})
-                elif gpool_name + "_AAAA" in self.pool_name_list:
+                if gpool_name + "_AAAA" in self.pool_name_list:
                     gpool_name = gpool_name + "_AAAA"
                     gpool_name = gpool_name.split("/")[-1]
                     gpool_name = self.name_replace(gpool_name)
                     gpool_list.append({"gpool_name": gpool_name,"ratio":sub_item["ratio"]})
-                elif gpool_name + "_CNAME" in self.pool_name_list:
+                if gpool_name + "_CNAME" in self.pool_name_list:
                     gpool_name = gpool_name + "_CNAME"
                     gpool_name = gpool_name.split("/")[-1]
                     gpool_name = self.name_replace(gpool_name)
                     gpool_list.append({"gpool_name": gpool_name,"ratio":sub_item["ratio"]})
-            self.inte_zonerrs(item,  algorithm, gpool_list)
+            if "*." in item:
+                self.inte_zonerrs(item.split("*.")[-1],  algorithm, gpool_list, domain="*")
+            else:
+                self.inte_zonerrs(item,  algorithm, gpool_list)
 
     def add_rrs_default(self):
         self.write_log("Start distributing configuration of the rrs(default)...")
@@ -775,7 +920,7 @@ class ConfigManage(SoapTransformation):
             self.add_rrs_default()
             self.write_log("Configuration synchronization complete!")
         except Exception as e:
-            self.write_log(e)
+            self.write_log(repr(e))
             os._exit(0)
 
 def main():
@@ -789,8 +934,6 @@ def main():
     parser.add_option("-w", "--zpasswd", dest = "zpasswd", help = "ZDNS's password", metavar = "default admin", default = "admin")
     parser.add_option("-f", "--file", dest = "file", help = "Select a file to recovery", metavar = "ex: 2021-05-19 15:35:13", default = None)
     (options, args) = parser.parse_args()
-    if options.server == None:
-        parser.error("missing required arguments")
     if options.file == None:
         if options.hostname == None:
             parser.error("missing required arguments")
@@ -808,7 +951,7 @@ def main():
         os.system('mkdir backup_data/')
     config = ConfigManage(hostname=options.hostname, username=options.account, password=options.passwd, port=options.port, server_ip=options.server, zuername=options.zaccount, zpassword=options.zpasswd, file_name=options.file)
     if options.file != None:
-        if len(os.popen("ps aux | grep soap_interface.py | grep -v grep | awk '{print $2}'").read().strip().split("\n")) != 1:
+        if len(os.popen("ps aux | grep %s | grep -v grep | grep -v vi | grep -v vim | awk '{print $2}'" % os.path.basename(__file__)).read().strip().split("\n")) > 1:
             parser.error("Synchronization process already exists")
         else:
             config.read_file()
